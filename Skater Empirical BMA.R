@@ -47,8 +47,8 @@ admin.key <- admin.key %>% dplyr::select(-geometry.x,-geometry.y)
 # load survey data and cluster info w surveyPrev COUNTRY SPECIFIC -----
 
 if(country=='Zambia'){
-  load(file="/Users/alanamcgovern/Desktop/Research/Regionalization/ZMB2013NMR_clusterdt.rda")
-  load(file="/Users/alanamcgovern/Desktop/Research/Regionalization/ZMB2018NMR_clusterdt.rda")
+  load(file="ZMB2013NMR_clusterdt.rda")
+  load(file="ZMB2018NMR_clusterdt.rda")
   
 }else if(country=='Nigeria'){
   load(file="/Users/alanamcgovern/Desktop/Research/Regionalization/NGA2013NMR_clusterdt.rda")
