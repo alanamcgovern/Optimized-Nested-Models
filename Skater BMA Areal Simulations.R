@@ -87,16 +87,16 @@ admin2_weights <- all_dat %>% group_by(admin2,admin1) %>% summarise(prop = sum(N
 admin2_to_admin1_weights <- admin2_weights %>% group_by(admin1) %>% mutate(prop = prop/sum(prop))
 
 # risk surface parameters -----
-rho <- c(0.005,0.01)[2]
-sigma <- c(0.15,0.25,0.5)[3]
-phi <- c(0.25,0.8)[2]
-alpha <- logit(0.035)
+rho <- 0.01
+sigma <- c(0.05,0.15,0.25)[1]
+phi <- 0.8
+intercept <- logit(0.035)
 
 # simulate  risk surface ------
 b <- as.vector(Rfast::rmvnorm(1,rep(0,n_admin2),sigma^2*(diag((1-phi),n_admin2) + phi*Q_scaled_inv)))
 
 # draw deaths from beta binomial
-mu <- sapply(1:nrow(all_dat),function(i){expit(alpha + b[all_dat$admin2[i]])})
+mu <- sapply(1:nrow(all_dat),function(i){expit(intercept + b[all_dat$admin2[i]])})
 alpha <- mu*(1-rho)/rho
 beta <- (1-mu)*(1-rho)/rho
 p <- sapply(1:nrow(all_dat),function(i){rbeta(1,alpha[i],beta[i])})
@@ -137,6 +137,7 @@ mod1 <- inla(Z ~ 1 + f(admin2,model='bym2',graph=admin2.mat, scale.model=T, cons
              control.family = list(hyper = overdisp.prior),
              family='betabinomial',
              control.compute = list(config=T),
+             control.fixed = list(mean.intercept = -3),
              data=obs_dat, Ntrials=n)
 mod1.draws <- get_inla_samples_local(mod1,1000)
 mod1.samples <- mod1.draws[,2*n_admin2+1] + mod1.draws[,1:n_admin2]
@@ -152,9 +153,10 @@ mod1.res <- data.frame(admin2 = 1:n_admin2,
 mod2 <- inla(Z ~ factor(admin1) -1 + f(admin2,model='bym2',graph=admin2.mat, scale.model=T, constr=T,
                                            hyper=bym2.prior),
              control.family = list(hyper = overdisp.prior),
+             control.fixed = list(mean.intercept = -3),
              family='betabinomial',
              control.compute = list(config=T),
-             data=dat.new, Ntrials=n)
+             data=obs_dat, Ntrials=n)
 mod2.draws <- get_inla_samples_local(mod2,1000)
 
 mod2.samples <- mod2.draws[,1:n_admin2] + mod2.draws[,2*n_admin2 + admin.key$admin1]
@@ -169,14 +171,14 @@ mod2.res <- data.frame(admin2 = 1:n_admin2,
 
 weighted.post.samples <- skater.res <- n_models <- NULL
 # how many models are averaged for each K
-K_seq <- c(10,15,20,25)
+K_seq <- c(5,10,20)
 
 for(K in K_seq){
   print(K)
   # eta.stage2.samples <- mclapply(1:10,function(j){
   eta.stage2.samples <- list()
   mlik <- NULL
-  for(j in 1:3){
+  for(j in 1:100){
     print(j)
     # get MST
     costs <- spdep::nbcosts(nb,expit(mod1.samples[j,]))
@@ -247,5 +249,83 @@ colnames(skater.res) <- c('admin2','K','lower90','median','upper90')
 
 # what do we want to record from each simulation? ------
 
+true_rates <- all_dat %>% group_by(admin2) %>% summarise(val=sum(Y)/sum(N))
+par(mfrow=c(2,2))
 
+hist(true_rates$val)
+hist(mod1.res$median)
+hist(mod2.res$median)
+
+# compare admin2 medians -- shrinkage is reduced
+
+## compare skater to no fixed effect
+for(K in K_seq){
+  plot(mod1.res$median,skater.res[skater.res$K==K,]$median,
+       xlab='Admin2 model',ylab=paste0('Average of 100 Skater models with ', K, ' regions'))
+  abline(0,1)
+}
+
+## compare skater to admin1 FE
+for(K in K_seq){
+  plot(mod2.res$median,skater.res[skater.res$K==K,]$median,
+       xlab='Admin1 + Admin2 model',ylab=paste0(K, ' skater regions'))
+  abline(0,1)
+}
+
+for(K in K_seq){
+  plot(true_rates$val,skater.res[skater.res$K==K,]$median,
+       xlab='Admin1 + Admin2 model',ylab=paste0(K, ' skater regions'))
+  abline(0,1)
+}
+
+plot(true_rates$val,mod2.res$median,
+     xlab='Admin1 + Admin2 model',ylab=paste0(K, ' skater regions'))
+abline(0,1)
+
+plot(true_rates$val,mod1.res$median,
+     xlab='Admin1 + Admin2 model',ylab=paste0(K, ' skater regions'))
+abline(0,1)
+
+# MSE
+for(K in K_seq){
+ print(mean((skater.res[skater.res$K==K,]$median - true_rates$val)^2))
+}
+
+mean((mod2.res$median - true_rates$val)^2)
+mean((mod1.res$median - true_rates$val)^2)
+
+# Coverage
+mean((mod1.res$lower90 <true_rates$val) & (mod1.res$upper90 >true_rates$val))
+mean((mod2.res$lower90 <true_rates$val) & (mod2.res$upper90 >true_rates$val))
+for(K in K_seq){
+  print(mean((skater.res[skater.res$K==K,]$lower90 <true_rates$val) & (skater.res[skater.res$K==K,]$upper90 >true_rates$val)))
+}
+
+
+mod1.res$ci.width <- (mod1.res$upper-mod1.res$lower)
+mod2.res$ci.width <- (mod2.res$upper-mod2.res$lower)
+skater.res$ci.width <- (skater.res$upper90 - skater.res$lower90)
+
+for(K in K_seq){
+  print(sd(skater.res[skater.res$K==K,]$median) )
+}
+
+for(K in K_seq){
+  print(mean(skater.res[skater.res$K==K,]$upper90-skater.res[skater.res$K==K,]$lower90) )
+}
+
+
+## compare skater to no fixed effect
+for(K in K_seq){
+  plot(mod1.res$ci.width,skater.res[skater.res$K==K,]$ci.width,
+       xlab='Admin2 model',ylab=paste0('Average of 10 Skater models with ', K, ' regions'),main='scaled CI width of NMR estimate')
+  abline(0,1)
+}
+
+## compare skater to admin1 FE
+for(K in K_seq){
+  plot(mod2.res$ci.width,skater.res[skater.res$K==K,]$ci.width,
+       xlab='Admin1 + Admin2 model',ylab=paste0('Average of 10 Skater models with ', K, ' regions'))
+  abline(0,1)
+}
 
