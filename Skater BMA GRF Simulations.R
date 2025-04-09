@@ -50,7 +50,7 @@ pop_surf <- project(pop_surf, "EPSG:32735")
 
 # collapse into lower res
 # 6km x 6km gives the approximate right number of clusters
-pop_surf <- terra::aggregate(pop_surf,fact=10,fun='sum')
+pop_surf <- terra::aggregate(pop_surf,fact=7,fun='sum')
 pop_surf <- trim(pop_surf)
 
 names(pop_surf) <- 'N'
@@ -159,9 +159,9 @@ coords <- crds(pop_surf)
 system.time({
 sim1 <- grf(grid=coords,cov.model = 'matern',
             mean=-3.5, # mean function, either scalar or vector with length equal to number of coordinates
-            nugget = 0.05^2,
+            nugget = 0.0^2,
             kappa=1, # smoothness parameter?
-            cov.pars = c(sigmasq = 0.2^2, #partial sill
+            cov.pars = c(sigmasq = 0.25^2, #partial sill
                          phi = 150e3)) # range parameter (150 km)
 })
 
@@ -169,9 +169,12 @@ sim1 <- grf(grid=coords,cov.model = 'matern',
 pixel_dat$r <- expit(sim1$data)
 
 # draw deaths in each pixel (cluster) from simulated risk surface -----
-pixel_dat$deaths <- apply(pixel_dat,1,function(x){rbinom(1,x['N'],x['r'])})
-#pixel_dat$deaths <- apply(pixel_dat,1,function(x){rpois(1,x['N']*x['r'])})
-pixel_dat <- pixel_dat[,c('x','y','pixel','admin1','admin2','N','r','deaths')]
+
+rho <- 0.05
+alpha <- pixel_dat$r*(1-rho)/rho
+beta <- (1-pixel_dat$r)*(1-rho)/rho
+p <- sapply(1:nrow(pixel_dat),function(i){rbeta(1,alpha[i],beta[i])})
+pixel_dat$deaths <- sapply(1:nrow(pixel_dat),function(i){rbinom(1, size = pixel_dat$N[i], prob = p[i])})
 
 # risk_surf <- rast(pixel_dat,crs="EPSG:32735")
 # 
@@ -249,8 +252,10 @@ adm2_rates$mod1.lower <- apply(expit(mod1.samples),2,quantile,probs=0.05)
 adm2_rates$mod1.upper <- apply(expit(mod1.samples),2,quantile,probs=0.95)
 
 # compare to true population rate
-adm2_rates %>% ggplot() + geom_point(aes(true_rate,mod1.median)) + geom_abline(intercept = 0, slope = 1)
+adm2_rates %>% ggplot() + geom_point(aes(true_rate,mod1.median)) + geom_abline(intercept = 0, slope = 1) +
+  xlim(range(adm2_rates$true_rate,adm2_rates$mod1.median)) + ylim(range(adm2_rates$true_rate,adm2_rates$mod1.median))
 mean(abs(adm2_rates$true_rate - adm2_rates$mod1.median))
+mean(adm2_rates$mod1.upper > adm2_rates$true_rate & adm2_rates$mod1.lower < adm2_rates$true_rate)
 
 
 fit2 <- inla(Y ~ factor(admin1) - 1 + f(admin2,model='bym2',graph=admin2.mat, scale.model=T, constr=T,
@@ -269,40 +274,21 @@ adm2_rates$mod2.upper <- apply(expit(mod2.samples),2,quantile,probs=0.95)
 # compare to true population rate
 adm2_rates %>% ggplot() + geom_point(aes(true_rate,mod2.median)) + geom_abline(intercept = 0, slope = 1)
 mean(abs(adm2_rates$true_rate - adm2_rates$mod2.median))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+mean(adm2_rates$mod2.upper > adm2_rates$true_rate & adm2_rates$mod2.lower < adm2_rates$true_rate)
 
 
 # for each K, get Skater model for each set of draws and summarise weighted posterior ------
 
-weighted.post.samples <- skater.res <- n_models <- NULL
+weighted.post.samples <- n_models <- NULL
 # how many models are averaged for each K
-K_seq <- c(5,10,20,25)
+K_seq <- c(5,10,20)
 
 for(K in K_seq){
   cat('K =', K)
   # eta.stage2.samples <- mclapply(1:10,function(j){
   eta.stage2.samples <- list()
   mlik <- NULL
-  for(j in 1:100){
+  for(j in 1:3){
     print(j)
     # get MST
     costs <- spdep::nbcosts(nb,expit(mod1.samples[j,]))
@@ -338,35 +324,97 @@ for(K in K_seq){
   }
   # },mc.cores=5)
   
-  # get weights for posterior
-  post_weights <- as.numeric(exp(mlik - (min(mlik) + log(sum(exp(mlik-min(mlik)))))))
-  
-  eta.samples <- lapply(1:length(eta.stage2.samples),function(m){data.frame(eta.stage2.samples[[m]],y=post_weights[m])})
+  names(mlik) <- NULL
+  eta.samples <- lapply(1:length(eta.stage2.samples),function(m){data.frame(eta.stage2.samples[[m]],y=mlik[m])})
   eta.samples.array <- do.call('rbind',eta.samples)
-  
-  #find quantile, q
-  q <- c(0.05,0.5,0.95)
-  target = q*sum(eta.samples.array$y)
-  
-  # for each each area, find that quantile from weighted posterior
-  quants <- t(sapply(1:n_admin2,function(area){
-    tmp <- eta.samples.array[,c(area,n_admin2+1)]
-    tmp_ord <- tmp[order(tmp[,1]),]
-    cdf <- cumsum(tmp_ord$y)
-    out <- sapply(target,function(x){tmp_ord[which.min(cdf<x),][,1]})
-    return(out)
-  }))
-  
-  skater.res.tmp <- data.frame(admin2 = 1:n_admin2, K=K)
-  skater.res.tmp[,3:5] <- expit(quants)
-  colnames(skater.res.tmp)[3:5] <- c('lower90','median','upper90')
   
   # record weighted posterior samples (in case we need other summaries later)
   weighted.post.samples[[length(weighted.post.samples)+1]] <- eta.samples.array
-  # record summarized results
-  skater.res <- rbind(skater.res,skater.res.tmp)
   # record how many models were averaged
   n_models[length(n_models)+1] <- length(mlik)
   
 }
+
+# get quantiles from weighted posterior
+get_weighted_quants <- function(samples,n_areas,q=c(0.05,0.5,0.95)){
+  samples$post_weights <- as.numeric(exp(samples$y - (min(samples$y) + log(sum(exp(samples$y-min(samples$y)))))))
+  target = q*sum(samples$post_weights)
+  
+  out <- t(sapply(1:n_areas, function(area){
+    tmp_ord <- samples[order(samples[,area]),]
+    cdf <- cumsum(tmp_ord$post_weights)
+    row <- sapply(target,function(x){tmp_ord[which.min(cdf<x),area]})
+    names(row) <- q
+    return(row)
+  }))
+  return(out)
+}
+
+# get estimates for each K
+quants <- lapply(weighted.post.samples, get_weighted_quants, n_areas = n_admin2)
+
+skater.res <- data.frame(admin2 = rep(1:n_admin2,3), K=rep(K_seq,each=n_admin2))
+skater.res[,3:5] <- expit(do.call('rbind',quants))
+colnames(skater.res)[3:5] <- c('lower90','median','upper90')
+
 colnames(skater.res) <- c('admin2','K','lower90','median','upper90')
+skater.res$ci.width <- skater.res$upper90 - skater.res$lower90
+
+# compare -------------
+
+# Compare ests to true rate
+par(mfrow=c(3,2))
+plot(adm2_rates$true_rate,adm2_rates$mod1.median)
+abline(0,1)
+plot(adm2_rates$true_rate,adm2_rates$mod2.median)
+abline(0,1)
+for(K in K_seq){
+  plot(adm2_rates$true_rate,skater.res[skater.res$K==K,]$median)
+  abline(0,1)
+}
+
+# Compare ci width (to no fixed effects model)
+plot(adm2_rates$mod1.upper - adm2_rates$mod1.lower,adm2_rates$mod2.upper - adm2_rates$mod2.lower)
+abline(0,1)
+for(K in K_seq){
+  plot(adm2_rates$mod1.upper - adm2_rates$mod1.lower,skater.res[skater.res$K==K,]$ci.width)
+  abline(0,1)
+}
+
+# shrinkage factor
+sd(adm2_rates$mod1.median)/sd(adm2_rates$true_rate)
+sd(adm2_rates$mod2.median)/sd(adm2_rates$true_rate)
+for(K in K_seq){
+  print(sd(skater.res[skater.res$K==K,]$median)/sd(adm2_rates$true_rate))
+}
+
+# MAE 
+mean(abs(adm2_rates$true_rate - adm2_rates$mod1.median))
+mean(abs(adm2_rates$true_rate - adm2_rates$mod2.median))
+for(K in K_seq){
+  print(mean(abs(adm2_rates$true_rate - skater.res[skater.res$K==K,]$median)))
+}
+
+# Nominal coverage 
+mean(adm2_rates$mod1.upper > adm2_rates$true_rate & adm2_rates$mod1.lower < adm2_rates$true_rate)
+mean(adm2_rates$mod2.upper > adm2_rates$true_rate & adm2_rates$mod2.lower < adm2_rates$true_rate)
+for(K in K_seq){
+  print(mean(skater.res[skater.res$K==K,]$upper90 > adm2_rates$true_rate & skater.res[skater.res$K==K,]$lower90 < adm2_rates$true_rate))
+}
+
+save(skater.resv1,file='Sim v1.rda')
+
+load('Sim v1.rda')
+
+for(K in K_seq){
+  plot(skater.res[skater.res$K==K,]$median,skater.resv1[skater.resv2$K==K,]$median)
+}
+
+for(K in K_seq){
+  print(mean(abs(adm2_rates$true_rate - skater.resv1[skater.resv1$K==K,]$median)))
+}
+
+
+sqrt(1/(nrow(adm2_rates)-1)*sum((adm2_rates$mod1.median - mean(adm2_rates$mod1.median))^2))
+
+sd(adm2_rates$mod1.median)
